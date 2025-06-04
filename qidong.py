@@ -14,6 +14,7 @@ from raft import RAFT
 #from utils.utils import InputPadder
 from models1.birefnet import BiRefNet  # 引入前景分割模型
 from torchvision import transforms
+import mediapipe as mp  # 添加MediaPipe库用于手部检测
 DEVICE = 'cuda'
 def make_colorwheel():
     """
@@ -208,19 +209,24 @@ def flow_to_image(flow_uv, clip_flow=None, convert_to_bgr=False):
     u = u / (rad_max + epsilon)
     v = v / (rad_max + epsilon)
     return flow_uv_to_colors(u, v, convert_to_bgr)
-def save_result(img, flo, output_dir, idx, metrics, is_valid):
-    """保存光流分析结果"""
-    img = img[0].permute(1,2,0).cpu().numpy()
-    flo = flo[0].permute(1,2,0).cpu().numpy()
-
-    # 将光流转换为RGB图像
-    flo_rgb = flow_to_image(flo)
+def save_result(img, flo, output_dir, idx, metrics, is_valid, imfile1=None, imfile2=None):
+    """保存光流分析结果和原图到指定子文件夹"""
+    import shutil
+    img_np = img[0].permute(1,2,0).cpu().numpy()
+    flo_np = flo[0].permute(1,2,0).cpu().numpy()
+    flo_rgb = flow_to_image(flo_np)
 
     # 创建输出目录（如果不存在）
     os.makedirs(output_dir, exist_ok=True)
 
+    # 保存原图
+    if imfile1 is not None:
+        shutil.copy(imfile1, os.path.join(output_dir, f'frame1{os.path.splitext(imfile1)[-1]}'))
+    if imfile2 is not None:
+        shutil.copy(imfile2, os.path.join(output_dir, f'frame2{os.path.splitext(imfile2)[-1]}'))
+
     # 保存合并后的图像
-    img_flo = np.concatenate([img, flo_rgb], axis=0)  # 垂直拼接原图和光流
+    img_flo = np.concatenate([img_np, flo_rgb], axis=0)  # 垂直拼接原图和光流
 
     # 添加运动指标文本
     status_text = f"Valid: {is_valid}"
@@ -235,11 +241,38 @@ def save_result(img, flo, output_dir, idx, metrics, is_valid):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
     # 保存结果图像
-    result_path = os.path.join(output_dir, f'result_{idx:04d}_{"valid" if is_valid else "invalid"}.png')
+    result_path = os.path.join(output_dir, f'result.png')
     cv2.imwrite(result_path, img_flo[:, :, ::-1])  # 转换为BGR格式
 
     print(f"已保存结果到: {result_path}")
     return result_path
+
+def detect_hands(image_path, confidence_threshold=0.8):
+    """使用MediaPipe检测图像中是否包含人手"""
+    # 初始化MediaPipe Hands
+    mp_hands = mp.solutions.hands
+    hands = mp_hands.Hands(
+        static_image_mode=True,
+        max_num_hands=2,
+        min_detection_confidence=confidence_threshold
+    )
+    
+    # 读取图像
+    image = cv2.imread(image_path)
+    if image is None:
+        return False
+    
+    # 转换为RGB
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    
+    # 处理图像
+    results = hands.process(image_rgb)
+    
+    # 释放资源
+    hands.close()
+    
+    # 检查是否检测到手
+    return results.multi_hand_landmarks is not None
 
 def demo(args):
     # 加载模型
@@ -252,9 +285,9 @@ def demo(args):
 
     birefnet = load_birefnet(args.birefnet_model)
 
-    # 创建输出目录
-    output_dir = os.path.join(args.path, 'flow_analysis')
-    os.makedirs(output_dir, exist_ok=True)
+    # 创建总输出目录
+    result_root = args.result_root
+    os.makedirs(result_root, exist_ok=True)
 
     # 记录有效帧对
     valid_pairs = []
@@ -267,10 +300,17 @@ def demo(args):
 
         print(f"找到 {len(images)} 张图像，将分析 {len(images)-1} 个相邻帧对")
 
+        valid_idx = 0
         for i, (imfile1, imfile2) in enumerate(zip(images[:-1], images[1:])):
             print(f"\n分析帧对 {i+1}/{len(images)-1}:")
             print(f"  帧1: {os.path.basename(imfile1)}")
             print(f"  帧2: {os.path.basename(imfile2)}")
+            
+            # 检查是否包含人手
+            if args.filter_hands:
+                if detect_hands(imfile1) or detect_hands(imfile2):
+                    print(f"  检测到人手，跳过此帧对")
+                    continue
 
             # 加载图像
             image1 = load_image(imfile1)
@@ -292,22 +332,28 @@ def demo(args):
             # 判断帧对是否有效
             valid = is_valid_frame_pair(motion_metrics)
             print(f"{valid}")
-            # 保存结果
-            result_path = save_result(image1, flow_up, output_dir, i, motion_metrics, valid)
-
-            # 记录有效帧对
             if valid:
+                # 为每个有效帧对创建子文件夹
+                pair_dir = os.path.join(result_root, f'pair_{valid_idx:04d}')
+                os.makedirs(pair_dir, exist_ok=True)
+                # 保存结果和原图
+                result_path = save_result(image1, flow_up, pair_dir, i, motion_metrics, valid, imfile1, imfile2)
                 valid_pairs.append({
-                    'index': i,
+                    'index': valid_idx,
                     'frame1': imfile1,
                     'frame2': imfile2,
                     'metrics': motion_metrics,
-                    'result_path': result_path
+                    'result_path': result_path,
+                    'pair_dir': pair_dir
                 })
+                valid_idx += 1
+            else:
+                # 也可以选择保存无效帧对，若不需要可省略
+                pass
 
     # 保存有效帧对列表
     if valid_pairs:
-        report_path = os.path.join(output_dir, 'valid_frame_pairs.txt')
+        report_path = os.path.join(result_root, 'valid_frame_pairs.txt')
         with open(report_path, 'w') as f:
             f.write("有效帧对报告:\n")
             f.write("="*50 + "\n")
@@ -318,7 +364,7 @@ def demo(args):
                 f.write(f"  前景运动: {pair['metrics']['foreground_motion']:.2f}\n")
                 f.write(f"  背景运动: {pair['metrics']['background_motion']:.2f}\n")
                 f.write(f"  前景运动像素比例: {pair['metrics']['foreground_moving_pixels']:.2%}\n")
-                f.write(f"  结果图像: {os.path.basename(pair['result_path'])}\n")
+                f.write(f"  结果文件夹: {os.path.basename(pair['pair_dir'])}\n")
                 f.write("-"*50 + "\n")
 
         print(f"\n找到 {len(valid_pairs)} 个有效帧对")
@@ -363,6 +409,16 @@ if __name__ == '__main__':
         '--multi_dir', 
         default=None,
         help="如果指定，该路径下的所有一级子文件夹都会被批量分析"
+    )
+    parser.add_argument(
+        '--filter_hands',
+        action='store_true',
+        help="过滤包含人手的图片"
+    )
+    parser.add_argument(
+        '--result_root',
+        default='result_root',
+        help="所有结果保存的总文件夹"
     )
     args = parser.parse_args()
 
