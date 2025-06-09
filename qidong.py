@@ -180,7 +180,7 @@ def analyze_flow(flow, foreground_mask, threshold=1.0):
         'foreground_moving_pixels': foreground_moving_pixels
     }
 
-def is_valid_frame_pair(metrics, foreground_threshold=5.0, background_threshold=0.5, motion_pixels_threshold=0.1):
+def is_valid_frame_pair(metrics, foreground_threshold=15.0, background_threshold=0.5, motion_pixels_threshold=0.1):
     """判断帧对是否满足前景运动、背景静止的条件"""
     return (metrics['foreground_motion'] > foreground_threshold and 
             metrics['background_motion'] < background_threshold and
@@ -247,7 +247,7 @@ def save_result(img, flo, output_dir, idx, metrics, is_valid, imfile1=None, imfi
     print(f"已保存结果到: {result_path}")
     return result_path
 
-def detect_hands(image_path, confidence_threshold=0.8):
+def detect_hands(image_path, confidence_threshold=0.4):
     """使用MediaPipe检测图像中是否包含人手"""
     # 初始化MediaPipe Hands
     mp_hands = mp.solutions.hands
@@ -388,11 +388,12 @@ def run_on_multiple_subfolders(args):
 
     for idx, subfolder in enumerate(subfolders):
         print(f'\n=== 处理第 {idx+1}/{len(subfolders)} 个子文件夹：{subfolder} ===\n')
-        # 构造新的参数对象
         from copy import deepcopy
         args_one = deepcopy(args)
         args_one.path = subfolder
-        # 每个子文件夹的输出会在：子文件夹/flow_analysis 下
+        # 新增：为每个子文件夹单独指定输出目录，避免结果覆盖
+        subfolder_name = os.path.basename(subfolder.rstrip('/'))
+        args_one.result_root = os.path.join(args.result_root, subfolder_name)
         try:
             demo(args_one)
         except Exception as e:
